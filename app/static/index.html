@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Video → Vietnamese</title>
+  <style>
+    :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; background: #f6f4ef; color: #181713; }
+    main { max-width: 760px; margin: 48px auto; padding: 0 20px; }
+    .panel { background: #fffdfa; border: 1px solid #ded8cc; border-radius: 20px; padding: 28px; box-shadow: 0 12px 40px rgba(30, 24, 10, .08); }
+    h1 { margin: 0 0 8px; font-size: 32px; letter-spacing: -.03em; }
+    p { color: #6a6254; line-height: 1.5; }
+    label { display: block; font-weight: 650; margin: 18px 0 8px; }
+    select, button { font: inherit; min-height: 44px; border-radius: 12px; border: 1px solid #cfc7b8; padding: 0 14px; background: white; }
+    button { cursor: pointer; background: #15130f; color: white; border-color: #15130f; font-weight: 700; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button.secondary { background: white; color: #15130f; }
+    :focus-visible { outline: 3px solid #f2b84b; outline-offset: 2px; }
+    .drop { display: grid; place-items: center; min-height: 190px; border: 2px dashed #c2b8a5; border-radius: 18px; background: #fbf8f1; text-align: center; cursor: pointer; }
+    .drop strong { display: block; font-size: 20px; margin-bottom: 6px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .actions { margin-top: 24px; display: flex; gap: 12px; flex-wrap: wrap; }
+    .hidden { display: none; }
+    .job-head { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; }
+    .stages { list-style: none; padding: 0; margin: 24px 0; }
+    .stages li { padding: 12px 14px; border-radius: 12px; margin-bottom: 8px; background: #f3efe6; }
+    .stages li.active { background: #fff0c7; font-weight: 700; }
+    .stages li.done { color: #236b35; }
+    .error { color: #a21d1d; background: #fff0f0; border: 1px solid #f0b8b8; padding: 12px; border-radius: 12px; }
+    video { width: 100%; border-radius: 14px; background: #111; margin: 16px 0; }
+    @media (max-width: 640px) { main { margin: 20px auto; } .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main>
+    <section id="idle" class="panel">
+      <h1>Video → Vietnamese</h1>
+      <p>Upload one video. Get a Vietnamese dub over lowered original audio, plus subtitles.</p>
+      <label class="drop" for="file">
+        <span><strong>Upload a video</strong><span id="filename">Drag here or click to choose</span></span>
+      </label>
+      <input id="file" class="hidden" type="file" accept="video/*" />
+      <div class="grid">
+        <div>
+          <label for="voice">Voice</label>
+          <select id="voice">
+            <option value="vi-VN-HoaiMyNeural">HoaiMy (nữ)</option>
+            <option value="vi-VN-NamMinhNeural">NamMinh (nam)</option>
+          </select>
+        </div>
+        <div>
+          <label for="model">Whisper model</label>
+          <select id="model">
+            <option value="mlx-community/whisper-large-v3-mlx">large-v3</option>
+            <option value="mlx-community/whisper-medium-mlx">medium</option>
+            <option value="mlx-community/whisper-small-mlx">small</option>
+          </select>
+        </div>
+      </div>
+      <div class="actions"><button id="submit" disabled>Translate</button></div>
+      <p id="idle-error" class="error hidden"></p>
+    </section>
+
+    <section id="job" class="panel hidden">
+      <div class="job-head"><h1 id="job-title">Processing</h1><span id="elapsed">00:00 elapsed</span></div>
+      <ul id="stages" class="stages"></ul>
+      <p id="job-error" class="error hidden"></p>
+      <div id="result" class="hidden">
+        <video id="player" controls></video>
+        <div class="actions">
+          <a id="video-link"><button>Download .mp4</button></a>
+          <a id="srt-link"><button class="secondary">Download .srt</button></a>
+          <button id="again" class="secondary">Translate another</button>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script>
+    const stageLabels = { extract: 'Extract audio', transcribe: 'Transcribe', translate: 'Translate to Vietnamese', dub: 'Generate dubbing', mux: 'Merge video' };
+    const stageOrder = ['extract', 'transcribe', 'translate', 'dub', 'mux'];
+    let selectedFile = null, jobId = null, startedAt = null, timer = null, poller = null;
+    const $ = id => document.getElementById(id);
+
+    $('file').addEventListener('change', () => {
+      selectedFile = $('file').files[0];
+      $('filename').textContent = selectedFile ? selectedFile.name : 'Drag here or click to choose';
+      $('submit').disabled = !selectedFile;
+    });
+    $('submit').addEventListener('click', startJob);
+    $('again').addEventListener('click', () => location.reload());
+
+    async function startJob() {
+      const form = new FormData();
+      form.append('file', selectedFile);
+      form.append('voice', $('voice').value);
+      form.append('model', $('model').value);
+      $('submit').disabled = true;
+      const res = await fetch('/jobs', { method: 'POST', body: form });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        $('idle-error').textContent = body.error || 'Upload failed';
+        $('idle-error').classList.remove('hidden');
+        $('submit').disabled = false;
+        return;
+      }
+      jobId = (await res.json()).id;
+      startedAt = Date.now();
+      $('idle').classList.add('hidden');
+      $('job').classList.remove('hidden');
+      timer = setInterval(renderElapsed, 1000);
+      poller = setInterval(poll, 1500);
+      await poll();
+    }
+
+    function renderElapsed() {
+      const seconds = Math.floor((Date.now() - startedAt) / 1000);
+      $('elapsed').textContent = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')} elapsed`;
+    }
+
+    async function poll() {
+      const job = await fetch(`/jobs/${jobId}`).then(r => r.json());
+      $('job-title').textContent = job.filename || 'Processing';
+      renderStages(job);
+      if (job.status === 'done') done(job);
+      if (job.status === 'error') fail(job);
+    }
+
+    function renderStages(job) {
+      $('stages').innerHTML = stageOrder.map(stage => {
+        const done = job.completed_stages.includes(stage);
+        const active = job.stage === stage;
+        return `<li class="${done ? 'done' : active ? 'active' : ''}">${done ? '✓' : active ? '⟳' : '○'} ${stageLabels[stage]}</li>`;
+      }).join('');
+    }
+
+    function done() {
+      clearInterval(timer); clearInterval(poller);
+      $('result').classList.remove('hidden');
+      $('player').src = `/jobs/${jobId}/file/video`;
+      $('video-link').href = `/jobs/${jobId}/file/video`;
+      $('srt-link').href = `/jobs/${jobId}/file/srt`;
+    }
+
+    function fail(job) {
+      clearInterval(timer); clearInterval(poller);
+      $('job-error').textContent = `Failed at ${job.stage || 'job'}: ${job.error || 'Unknown error'}`;
+      $('job-error').classList.remove('hidden');
+    }
+  </script>
+</body>
+</html>
